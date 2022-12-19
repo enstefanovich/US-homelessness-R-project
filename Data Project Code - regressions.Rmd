@@ -1,0 +1,338 @@
+---
+title: "Homelessness code"
+output: html_document
+---
+
+```{r}
+library(readxl)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(leaps)
+library(Hmisc)
+```
+
+**Check data**
+
+```{r}
+States <- Data_Project_Spreadsheet
+
+summary(States)
+```
+
+**Impute data for EVICRT (254 missing cases)**
+
+```{r}
+bestfit.imp <- regsubsets(EVICRT ~ HMLSS + RNTVCY + AVGRNT + MEDINC + UNEMPL + POP, data = States)
+
+bestfit.imp.summary <- summary(bestfit.imp)
+bestfit.imp.summary
+
+
+plot(bestfit.imp.summary$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.imp.summary$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.imp.summary$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.imp.summary$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.imp.summary$rss)
+which.max(bestfit.imp.summary$adjr2)
+which.min(bestfit.imp.summary$cp)
+which.min(bestfit.imp.summary$bic)
+
+coef(bestfit.imp, 3)
+```
+
+```{r}
+# Step 1: Create the storage space
+States_imp <- States
+
+# Step 2: Choose the model
+impmodel_evicrt <- lm(EVICRT ~ RNTVCY + AVGRNT + UNEMPL, data = States)
+
+#Step 3: Check the `summary` output of the model
+summary(impmodel_evicrt)
+
+#Step 4: Identify which rows are missing
+isna_evicrt <- which(is.na(States$EVICRT)==TRUE)
+
+#Step 5: Add random component:
+set.seed(10)
+# Sample errors
+errors <- rnorm(length(isna_evicrt), 0 , 
+                 sd = summary(impmodel_evicrt)$sigma)
+
+#Step 6: Make predictions
+predict_evicrt <- predict(impmodel_evicrt, States[isna_evicrt,])
+
+#Step 7: Fill in the predictions for the missing values plus random component
+States_imp$EVICRT[isna_evicrt] <- predict_evicrt + errors
+
+#Step 8: Check results of imputation
+summary(States_imp$EVICRT)
+```
+
+```{r}
+#Remove negative imputations (eviction rate can't be negative)
+States_imp$EVICRT[States_imp$EVICRT < 0] <- NA
+
+#No imputations
+op <-par(mfrow=c(1, 2))
+plot(States$EVICRT ~ States$RNTVCY, pch = 20, xlab ="RNTVCY", ylab = "EVICRT", main = "Without Imputations",col = 3)
+
+#Imputations
+plot(States_imp$EVICRT ~ States_imp$RNTVCY,col = (is.na(States$EVICRT)+3), pch = 20, xlab ="RNTVCY", ylab = "EVICRT", main = "With Imputations")
+par(op)
+
+#Turned out really well actually, nice
+summary(States_imp)
+```
+
+**Separate U.S. into Population Groups (population in 2020)**
+
+```{r}
+RecentYear <- States_imp %>% filter(grepl("2020", YEAR))
+RecentYearPop <- arrange(RecentYear, POP)
+
+RecentYearPop$PopRank <- cut(RecentYearPop$POP, 6)
+
+#Small state: pop < 7050000
+#Medium state: 7050000 < pop <= 13500000
+#Large state: pop > 13500000
+```
+
+```{r}
+States_large <- States_imp %>% filter(grepl("NY|FL|TX|CA", STATE))
+States_medium <- States_imp %>% filter(grepl("AZ|WA|VA|NJ|MI|NC|GA|OH|IL|PA", STATE))
+States_small <- States_imp %>% filter(!grepl("NY|FL|TX|CA|AZ|WA|VA|NJ|MI|NC|GA|OH|IL|PA", STATE))
+
+summary(States_imp$PCTPOP)
+summary(States_large$PCTPOP)
+summary(States_medium$PCTPOP)
+summary(States_small$PCTPOP)
+```
+
+**All States**
+
+```{r}
+bestfit.df.states <- regsubsets(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, data = States_imp)
+
+bestfit.df.summary.states <- summary(bestfit.df.states)
+bestfit.df.summary.states
+
+
+plot(bestfit.df.summary.states$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.df.summary.states$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.df.summary.states$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.df.summary.states$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.df.summary.states$rss)
+which.max(bestfit.df.summary.states$adjr2)
+which.min(bestfit.df.summary.states$cp)
+which.min(bestfit.df.summary.states$bic)
+
+
+coef(bestfit.df.states, 5)
+```
+
+```{r}
+#US
+lm.US <- lm(PCTPOP ~ EVICRT + AVGRNT + RNTSTUD + UNEMPL + POP, data = States_imp)
+summary(lm.US)
+
+#Test state
+test.state <- States_imp
+
+lm.test.state <- lm(PCTPOP ~ EVICRT + AVGRNT + RNTSTUD + UNEMPL + POP, data = test.state)
+summary(lm.test.state)
+
+
+test.state$lm_test <- predict(lm.test.state, test.state)
+
+#cross-validation correlation
+c <- cor(test.state$lm_test, test.state$PCTPOP, use = "pairwise.complete.obs")
+c^2
+#shrinkage
+(summary(lm.test.state)$r.squared) - (c^2)
+#MAE
+mean(abs(test.state$lm_test - test.state$PCTPOP), na.rm = TRUE)
+
+
+#plot prediction accuracy
+ggplot() + 
+    geom_point(aes(x = test.state$lm_test, y = test.state$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "red", size = 1) +
+    theme_minimal() +
+    ggtitle("LM - All States") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+```
+
+**Large States**
+
+```{r}
+bestfit.df.large <- regsubsets(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, data = States_large)
+
+bestfit.df.summary.large <- summary(bestfit.df.large)
+bestfit.df.summary.large
+
+
+plot(bestfit.df.summary.large$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.df.summary.large$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.df.summary.large$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.df.summary.large$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.df.summary.large$rss)
+which.max(bestfit.df.summary.large$adjr2)
+which.min(bestfit.df.summary.large$cp)
+which.min(bestfit.df.summary.large$bic)
+
+
+coef(bestfit.df.large, 4)
+```
+
+```{r}
+#US
+lm.US <- lm(PCTPOP ~ AVGRNT + MEDINC + UNEMPL + POP, data = States_imp)
+summary(lm.US)
+
+#Large state
+test.state.large <- States_large
+
+lm.test.state.large <- lm(PCTPOP ~ EVICRT + AVGRNT + RNTSTUD + MEDINC + POP, data = test.state.large)
+summary(lm.test.state.large)
+
+
+test.state.large$lm_test <- predict(lm.test.state.large, test.state.large)
+
+#cross-validation correlation
+c <- cor(test.state.large$lm_test, test.state.large$PCTPOP, use = "pairwise.complete.obs")
+c^2
+#shrinkage
+(summary(lm.test.state.large)$r.squared) - (c^2)
+#MAE
+mean(abs(test.state.large$lm_test - test.state.large$PCTPOP), na.rm = TRUE)
+
+
+#plot prediction accuracy
+ggplot() + 
+    geom_point(aes(x = test.state.large$lm_test, y = test.state.large$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "blue", size = 1) +
+    theme_minimal() +
+    ggtitle("LM - Large States (population > 13,500,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+```
+
+**Medium States**
+
+```{r}
+bestfit.df.medium <- regsubsets(HMLSS ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, data = States_medium)
+
+bestfit.df.summary.medium <- summary(bestfit.df.medium)
+bestfit.df.summary.medium
+
+
+plot(bestfit.df.summary.medium$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.df.summary.medium$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.df.summary.medium$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.df.summary.medium$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.df.summary.medium$rss)
+which.max(bestfit.df.summary.medium$adjr2)
+which.min(bestfit.df.summary.medium$cp)
+which.min(bestfit.df.summary.medium$bic)
+
+
+coef(bestfit.df.medium, 5)
+```
+
+```{r}
+#US
+lm.US <- lm(PCTPOP ~ EVICRT + AVGRNT + MEDINC + UNEMPL + POP, data = States_imp)
+summary(lm.US)
+
+#Medium state
+test.state.medium <- States_medium
+
+lm.test.state.medium <- lm(PCTPOP ~ RNTVCY + AVGRNT + RNTSTUD + UNEMPL + POP, data = test.state.medium)
+summary(lm.test.state.medium)
+
+
+test.state.medium$lm_test <- predict(lm.test.state.medium, test.state.medium)
+
+#cross-validation correlation
+c <- cor(test.state.medium$lm_test, test.state.medium$PCTPOP, use = "pairwise.complete.obs")
+c^2
+#shrinkage
+(summary(lm.test.state.medium)$r.squared) - (c^2)
+#MAE
+mean(abs(test.state.medium$lm_test - test.state.medium$PCTPOP), na.rm = TRUE)
+
+
+#plot prediction accuracy
+ggplot() + 
+    geom_point(aes(x = test.state.medium$lm_test, y = test.state.medium$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "purple", size = 1) +
+    theme_minimal() +
+    ggtitle("LM - Medium States (7,050,000 < population <= 13,500,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+```
+
+**Small States**
+
+```{r}
+bestfit.df.small <- regsubsets(HMLSS ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, data = States_small)
+
+bestfit.df.summary.small <- summary(bestfit.df.small)
+bestfit.df.summary.small
+
+
+plot(bestfit.df.summary.small$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.df.summary.small$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.df.summary.small$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.df.summary.small$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.df.summary.small$rss)
+which.max(bestfit.df.summary.small$adjr2)
+which.min(bestfit.df.summary.small$cp)
+which.min(bestfit.df.summary.small$bic)
+
+
+coef(bestfit.df.small, 5)
+```
+
+```{r}
+#US
+lm.US <- lm(PCTPOP ~ RNTVCY + AVGRNT + RNTSTUD + UNEMPL + POP, data = States_imp)
+summary(lm.US)
+
+#Small state
+test.state.small <- States_small
+
+lm.test.state.small <- lm(PCTPOP ~ RNTVCY + AVGRNT + RNTSTUD + UNEMPL + POP, data = test.state.small)
+summary(lm.test.state.small)
+
+
+test.state.small$lm_test <- predict(lm.test.state.small, test.state.small)
+
+#cross-validation correlation
+c <- cor(test.state.small$lm_test, test.state.small$PCTPOP, use = "pairwise.complete.obs")
+c^2
+
+#shrinkage
+(summary(lm.test.state.small)$r.squared) - (c^2)
+
+#MAE
+mean(abs(test.state.small$lm_test - test.state.small$PCTPOP), na.rm = TRUE)
+
+
+#plot prediction accuracy
+ggplot() + 
+    geom_point(aes(x = test.state.small$lm_test, y = test.state.small$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "green4", size = 1) +
+    theme_minimal() +
+    ggtitle("LM - Small States (population <= 7,050,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+```
