@@ -1,0 +1,264 @@
+---
+title: "Homelessness code"
+output: html_document
+---
+
+```{r}
+library(readxl)
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(leaps)
+library(Hmisc)
+library(tree)
+library(ggplot2)
+library(ggpmisc)
+```
+
+**Check data**
+
+```{r}
+States <- Data_Project_Spreadsheet
+
+summary(States)
+```
+
+**Impute data for EVICRT (254 missing cases)**
+
+```{r}
+bestfit.imp <- regsubsets(EVICRT ~ HMLSS + RNTVCY + AVGRNT + MEDINC + UNEMPL + POP, data = States)
+
+bestfit.imp.summary <- summary(bestfit.imp)
+bestfit.imp.summary
+
+
+plot(bestfit.imp.summary$rss, xlab = "Number of Variables", ylab = "RSS", type = "l")
+plot(bestfit.imp.summary$adjr2, xlab = "Number of Variables", ylab = "Adjusted RSq", type = "l")
+plot(bestfit.imp.summary$cp, xlab = "Number of Variables", ylab = "Cp", type = "l")
+plot(bestfit.imp.summary$bic, xlab = "Number of Variables", ylab = "BIC", type = "l")
+
+which.min(bestfit.imp.summary$rss)
+which.max(bestfit.imp.summary$adjr2)
+which.min(bestfit.imp.summary$cp)
+which.min(bestfit.imp.summary$bic)
+
+coef(bestfit.imp, 3)
+```
+
+```{r}
+# Step 1: Create the storage space
+States_imp <- States
+
+# Step 2: Choose the model
+impmodel_evicrt <- lm(EVICRT ~ RNTVCY + AVGRNT + UNEMPL, data = States)
+
+#Step 3: Check the `summary` output of the model
+summary(impmodel_evicrt)
+
+#Step 4: Identify which rows are missing
+isna_evicrt <- which(is.na(States$EVICRT)==TRUE)
+
+#Step 5: Add random component:
+set.seed(10)
+# Sample errors
+errors <- rnorm(length(isna_evicrt), 0 , 
+                 sd = summary(impmodel_evicrt)$sigma)
+
+#Step 6: Make predictions
+predict_evicrt <- predict(impmodel_evicrt, States[isna_evicrt,])
+
+#Step 7: Fill in the predictions for the missing values plus random component
+States_imp$EVICRT[isna_evicrt] <- predict_evicrt + errors
+
+#Step 8: Check results of imputation
+summary(States_imp$EVICRT)
+```
+
+```{r}
+#Remove negative imputations (eviction rate can't be negative)
+States_imp$EVICRT[States_imp$EVICRT < 0] <- NA
+
+#No imputations
+op <-par(mfrow=c(1, 2))
+plot(States$EVICRT ~ States$RNTVCY, pch = 20, xlab ="RNTVCY", ylab = "EVICRT", main = "Without Imputations",col = 3)
+
+#Imputations
+plot(States_imp$EVICRT ~ States_imp$RNTVCY,col = (is.na(States$EVICRT)+3), pch = 20, xlab ="RNTVCY", ylab = "EVICRT", main = "With Imputations")
+par(op)
+
+#Turned out really well actually, nice
+summary(States_imp)
+```
+
+**Separate U.S. into 3 Population Groups (population in 2020)**
+
+```{r}
+RecentYear <- States_imp %>% filter(grepl("2020", YEAR))
+RecentYearPop <- arrange(RecentYear, POP)
+
+RecentYearPop$PopRank <- cut(RecentYearPop$POP, 6)
+
+#Small state: pop < 7050000
+#Medium state: 7050000 < pop <= 13500000
+#Large state: pop > 13500000
+```
+
+```{r}
+States_large <- States_imp %>% filter(grepl("NY|FL|TX|CA", STATE))
+States_medium <- States_imp %>% filter(grepl("AZ|WA|VA|NJ|MI|NC|GA|OH|IL|PA", STATE))
+States_small <- States_imp %>% filter(!grepl("NY|FL|TX|CA|AZ|WA|VA|NJ|MI|NC|GA|OH|IL|PA", STATE))
+
+summary(States_imp$PCTPOP)
+summary(States_large$PCTPOP)
+summary(States_medium$PCTPOP)
+summary(States_small$PCTPOP)
+```
+
+**All States**
+
+```{r}
+set.seed(10)
+#All states
+tree_states <- tree(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, States_imp)
+
+summary(tree_states)
+
+#original tree
+plot(tree_states)
+text(tree_states, pretty = 0, cex=0.7)
+
+#pruned tree
+cv_states <- cv.tree(tree_states)
+plot(cv_states$size, cv_states$dev, type = 'b')
+
+prune_states <- prune.tree(tree_states, best = 16)
+plot(prune_states)
+text(prune_states, pretty = 0, cex=0.7)
+```
+
+```{r}
+#All states
+tree_estimate_states <- predict(prune_states, newdata = States_imp)
+
+options(scipen = 10000)
+ggplot() + 
+    geom_point(aes(x = tree_estimate_states, y = States_imp$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "red", size = 1) +
+    theme_minimal() +
+    ggtitle("All States") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+
+sqrt(mean((tree_estimate_states - States_imp$PCTPOP)^2, na.rm = TRUE))
+```
+
+**Large States**
+
+```{r}
+set.seed(10)
+#Large states
+tree_large <- tree(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, States_large)
+
+summary(tree_large)
+
+#original tree
+plot(tree_large)
+text(tree_large, pretty = 0, cex=0.7)
+
+#pruned tree
+cv_large <- cv.tree(tree_large)
+plot(cv_large$size, cv_large$dev, type = 'b')
+
+prune_large <- prune.tree(tree_large, best = 5)
+plot(prune_large)
+text(prune_large, pretty = 0, cex=0.7)
+```
+
+```{r}
+#Large states
+tree_estimate_large <- predict(prune_large, newdata = States_large)
+
+ggplot() + 
+    geom_point(aes(x = tree_estimate_large, y = States_large$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "blue", size = 1) +
+    theme_minimal() +
+    ggtitle("Large States (population > 13,500,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+
+sqrt(mean((tree_estimate_large - States_large$PCTPOP)^2, na.rm = TRUE))
+```
+
+**Medium States**
+
+```{r}
+set.seed(10)
+#Medium states
+tree_medium <- tree(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, States_medium)
+
+summary(tree_medium)
+
+#original tree
+plot(tree_medium)
+text(tree_medium, pretty = 0, cex=0.7)
+
+#pruned tree
+cv_medium <- cv.tree(tree_medium)
+plot(cv_medium$size, cv_medium$dev, type = 'b')
+
+prune_medium <- prune.tree(tree_medium, best = 9)
+plot(prune_medium)
+text(prune_medium, pretty = 0, cex=0.7)
+```
+
+```{r}
+#Medium states
+tree_estimate_medium <- predict(prune_medium, newdata = States_medium)
+
+ggplot() + 
+    geom_point(aes(x = tree_estimate_medium, y = States_medium$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "purple", size = 1) +
+    theme_minimal() +
+    ggtitle("Medium States (7,050,000 < population <= 13,500,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+
+sqrt(mean((tree_estimate_medium - States_medium$PCTPOP)^2, na.rm = TRUE))
+```
+
+**Small States**
+
+```{r}
+set.seed(10)
+#Small states
+tree_small <- tree(PCTPOP ~ RNTVCY + EVICRT + AVGRNT + RNTSTUD + MEDINC + UNEMPL + POP, States_small)
+
+summary(tree_small)
+
+#original tree
+plot(tree_small)
+text(tree_small, pretty = 0, cex=0.7)
+
+#pruned tree
+cv_small <- cv.tree(tree_small)
+plot(cv_small$size, cv_small$dev, type = 'b')
+
+prune_small <- prune.tree(tree_small, best = 16)
+plot(prune_small)
+text(prune_small, pretty = 0, cex=0.7)
+```
+
+```{r}
+#Small states
+tree_estimate_small <- predict(prune_small, newdata = States_small)
+
+ggplot() + 
+    geom_point(aes(x = tree_estimate_small, y = States_small$PCTPOP), alpha = 0.5) +
+    geom_abline(color = "green4", size = 1) +
+    theme_minimal() +
+    ggtitle("Small States (population <= 7,050,000)") +
+    labs(x = "Predicted % Homeless", 
+         y = "Actual % Homeless")
+
+sqrt(mean((tree_estimate_small - States_small$PCTPOP)^2, na.rm = TRUE))
+```
